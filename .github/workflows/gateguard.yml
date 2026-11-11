@@ -161,6 +161,7 @@ jobs:
             exit 1
           fi
 
+          GATEGUARD_API_URL="$(printf "%s" "$GATEGUARD_API_URL" | sed -E "s/^\[//; s/\]\([^)]*\)$//; s/[[:space:]]//g; s/\r//g; s/\/$//")"
           curl --fail-with-body -sS \
             -X POST "$GATEGUARD_API_URL/api/ci/$GATEGUARD_PROJECT_ID/results" \
             -H "Content-Type: application/json" \
