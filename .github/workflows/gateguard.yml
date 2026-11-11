@@ -140,6 +140,14 @@ jobs:
           print(json.dumps(result, indent=2))
           PY
 
+      - name: Check GateGuard configuration
+        if: always()
+        run: |
+          echo "API URL length: ${#GATEGUARD_API_URL}"
+          echo "API URL: <$GATEGUARD_API_URL>"
+          echo "Project ID configured: $([[ -n "$GATEGUARD_PROJECT_ID" ]] && echo yes || echo no)"
+          echo "CI token configured: $([[ -n "$GATEGUARD_CI_TOKEN" ]] && echo yes || echo no)"
+
       - name: Send results to GateGuard
         if: always()
         run: |
