@@ -1,0 +1,174 @@
+name: GateGuard CI Quality Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  quality-check:
+    runs-on: ubuntu-latest
+
+    env:
+      GATEGUARD_API_URL: ${{ vars.GATEGUARD_API_URL }}
+      GATEGUARD_PROJECT_ID: ${{ vars.GATEGUARD_PROJECT_ID }}
+      GATEGUARD_CI_TOKEN: ${{ secrets.GATEGUARD_CI_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        run: python -m pip install -r backend/requirements.txt
+
+      - name: Run backend tests and coverage
+        id: backend_tests
+        continue-on-error: true
+        working-directory: backend
+        run: |
+          python -m pytest \
+            --cov=app \
+            --cov-branch \
+            --cov-report=json:coverage.json \
+            --junitxml=test-results.xml \
+            tests sample_project
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install frontend dependencies
+        run: npm install --prefix frontend --no-audit --no-fund
+
+      - name: Build frontend
+        id: frontend_build
+        continue-on-error: true
+        run: npm run build --prefix frontend
+
+      - name: Generate GateGuard result
+        if: always()
+        env:
+          TEST_OUTCOME: ${{ steps.backend_tests.outcome }}
+          BUILD_OUTCOME: ${{ steps.frontend_build.outcome }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import xml.etree.ElementTree as ET
+          from datetime import datetime, timezone
+
+          # Read pytest results
+          total = passed = failed = skipped = 0
+          junit_path = "backend/test-results.xml"
+
+          if os.path.exists(junit_path):
+              root = ET.parse(junit_path).getroot()
+              for case in root.iter("testcase"):
+                  total += 1
+                  if case.find("failure") is not None or case.find("error") is not None:
+                      failed += 1
+                  elif case.find("skipped") is not None:
+                      skipped += 1
+                  else:
+                      passed += 1
+
+          # Read coverage results
+          coverage = {
+              "statements": 0,
+              "branches": 0,
+              "functions": 0,
+              "lines": 0
+          }
+
+          coverage_path = "backend/coverage.json"
+          if os.path.exists(coverage_path):
+              with open(coverage_path, encoding="utf-8") as file:
+                  totals = json.load(file).get("totals", {})
+
+              statement_coverage = totals.get("percent_statements_covered", 0)
+              coverage["statements"] = statement_coverage
+              coverage["lines"] = statement_coverage
+              coverage["branches"] = totals.get("percent_branches_covered", 0)
+
+          # Function coverage is not measured by the current test setup.
+          test_outcome = os.getenv("TEST_OUTCOME", "failure")
+          build_outcome = os.getenv("BUILD_OUTCOME", "failure")
+
+          result = {
+              "source": "github-actions",
+              "branch": os.getenv("GITHUB_REF_NAME", "unknown"),
+              "commitSha": os.getenv("GITHUB_SHA", ""),
+              "startedAt": datetime.now(timezone.utc).isoformat(),
+              "metrics": {
+                  "coverage": coverage,
+                  "tests": {
+                      "total": total,
+                      "passed": passed,
+                      "failed": failed,
+                      "skipped": skipped
+                  },
+                  "eslint": {
+                      "errors": 0,
+                      "warnings": 0
+                  },
+                  "security": {
+                      "critical": 0,
+                      "high": 0,
+                      "moderate": 0,
+                      "low": 0
+                  },
+                  "pipeline": {
+                      "typecheckPassed": build_outcome == "success",
+                      "buildPassed": build_outcome == "success",
+                      "lintExecuted": False,
+                      "auditCompleted": False
+                  }
+              }
+          }
+
+          with open("gateguard-result.json", "w", encoding="utf-8") as file:
+              json.dump(result, file, indent=2)
+
+          print(json.dumps(result, indent=2))
+          PY
+
+      - name: Send results to GateGuard
+        if: always()
+        run: |
+          if [ -z "$GATEGUARD_CI_TOKEN" ]; then
+            echo "GateGuard token is unavailable. Skipping upload."
+            exit 0
+          fi
+
+          if [ -z "$GATEGUARD_API_URL" ] || [ -z "$GATEGUARD_PROJECT_ID" ]; then
+            echo "GateGuard repository variables are missing."
+            exit 1
+          fi
+
+          curl --fail-with-body -sS \
+            -X POST "$GATEGUARD_API_URL/api/ci/$GATEGUARD_PROJECT_ID/results" \
+            -H "Content-Type: application/json" \
+            -H "X-GateGuard-Token: $GATEGUARD_CI_TOKEN" \
+            --data-binary @gateguard-result.json \
+            -o gateguard-response.json
+
+          cat gateguard-response.json
+
+      - name: Mark workflow failed if tests or build failed
+        if: always()
+        env:
+          TEST_OUTCOME: ${{ steps.backend_tests.outcome }}
+          BUILD_OUTCOME: ${{ steps.frontend_build.outcome }}
+        run: |
+          if [ "$TEST_OUTCOME" != "success" ] || [ "$BUILD_OUTCOME" != "success" ]; then
+            echo "Backend tests or frontend build failed."
+            exit 1
+          fi
